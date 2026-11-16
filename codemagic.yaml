@@ -123,9 +123,6 @@ workflows:
 
       - name: Install LunarG Vulkan SDK
         script: |
-
-      - name: Install LunarG Vulkan SDK
-        script: |
           set -euo pipefail
 
           SDK_VERSION="${VULKAN_VERSION}"
