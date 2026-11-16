@@ -33,7 +33,11 @@ workflows:
       - name: Install build tools
         script: |
           set -euo pipefail
-          brew install cmake ninja meson pkgconf python xcodegen
+          brew install cmake ninja meson pkgconf python xcodegen glslang
+          export PATH="$(brew --prefix)/bin:$(brew --prefix)/sbin:$PATH"          
+          echo "=== Checking GLSL Shader Compiler ==="
+          command -v glslangValidator
+          glslangValidator --version
           cmake --version
           ninja --version
           meson --version
@@ -126,6 +130,9 @@ workflows:
           export VCPKG_ROOT="$HOME/vcpkg"
           export VULKAN_SDK="$HOME/VulkanSDK/${VULKAN_SDK_VERSION}/macOS"
           test -f "$VULKAN_SDK/lib/MoltenVK.xcframework/ios-arm64/libMoltenVK.a"
+          export PATH="$(brew --prefix)/bin:$(brew --prefix)/sbin:$PATH"
+          command -v glslangValidator
+          glslangValidator --version
           cmake --preset ios-vulkan
 
       - name: Compile Generals Zero Hour engine for iPhone
@@ -133,6 +140,9 @@ workflows:
           set -euo pipefail
           export VCPKG_ROOT="$HOME/vcpkg"
           export VULKAN_SDK="$HOME/VulkanSDK/${VULKAN_SDK_VERSION}/macOS"
+          export PATH="$(brew --prefix)/bin:$(brew --prefix)/sbin:$PATH"
+          command -v glslangValidator
+          glslangValidator --version
           cmake --build build/ios-vulkan --target z_generals --parallel "$(sysctl -n hw.ncpu)"
 
           GAME_BIN="build/ios-vulkan/GeneralsMD/GeneralsXZH.app/GeneralsXZH"
