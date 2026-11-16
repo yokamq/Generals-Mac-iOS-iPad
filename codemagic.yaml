@@ -123,51 +123,106 @@ workflows:
 
       - name: Install LunarG Vulkan SDK
         script: |
+
+      - name: Install LunarG Vulkan SDK
+        script: |
           set -euo pipefail
 
-          SDK_INSTALL="$HOME/VulkanSDK/${VULKAN_VERSION}"
+          SDK_VERSION="${VULKAN_VERSION}"
+          SDK_INSTALL="$HOME/VulkanSDK/${SDK_VERSION}"
+          SDK_ARCHIVE="$CM_BUILD_DIR/vulkansdk-macos-${SDK_VERSION}.zip"
+          SDK_TEMP="$CM_BUILD_DIR/vulkan-sdk-unpack"
+
+          export VULKAN_SDK="$SDK_INSTALL/macOS"
+
           SDK_CHECK="$VULKAN_SDK/lib/MoltenVK.xcframework/ios-arm64/libMoltenVK.a"
 
+          # Check if the required SDK is already installed.
           if [ -f "$SDK_CHECK" ]; then
             echo "Vulkan SDK already installed."
           else
 
-            echo "Downloading Vulkan SDK ${VULKAN_VERSION}..."
+            echo "Downloading Vulkan SDK ${SDK_VERSION}..."
 
             mkdir -p "$HOME/VulkanSDK"
+            mkdir -p "$SDK_TEMP"
 
-            curl -fL --retry 3 \
-              "https://sdk.lunarg.com/sdk/download/${VULKAN_VERSION}/mac/vulkansdk-macos-${VULKAN_VERSION}.dmg" \
-              -o "$CM_BUILD_DIR/vulkan.dmg"
+            # Correct macOS download format: ZIP, not DMG.
+            curl -fL --retry 3 --retry-delay 5 \
+              "https://sdk.lunarg.com/sdk/download/${SDK_VERSION}/mac/vulkansdk-macos-${SDK_VERSION}.zip" \
+              -o "$SDK_ARCHIVE"
 
-            hdiutil attach "$CM_BUILD_DIR/vulkan.dmg" \
-              -mountpoint /Volumes/VulkanSDK \
-              -nobrowse
+            echo "Checking downloaded archive..."
 
-            INSTALLER="/Volumes/VulkanSDK/InstallVulkan.app/Contents/MacOS/InstallVulkan"
+            test -s "$SDK_ARCHIVE"
+            file "$SDK_ARCHIVE"
 
-            if [ ! -x "$INSTALLER" ]; then
-              echo "Vulkan installer not found."
-              ls -la /Volumes/VulkanSDK
+            echo "Extracting Vulkan SDK..."
+
+            ditto -x -k "$SDK_ARCHIVE" "$SDK_TEMP"
+
+            # Locate the macOS installer application.
+            INSTALLER_APP=$(find "$SDK_TEMP" \
+              -maxdepth 3 \
+              -type d \
+              -name "vulkansdk-macOS-${SDK_VERSION}.app" \
+              -print -quit)
+
+            if [ -z "$INSTALLER_APP" ]; then
+              echo "ERROR: Vulkan SDK installer application not found."
+              find "$SDK_TEMP" -maxdepth 4 -print
               exit 1
             fi
 
+            INSTALLER=$(find "$INSTALLER_APP/Contents/MacOS" \
+              -maxdepth 1 \
+              -type f \
+              -perm -111 \
+              -print -quit)
+
+            if [ -z "$INSTALLER" ]; then
+              echo "ERROR: Vulkan installer executable not found."
+              exit 1
+            fi
+
+            echo "Running Vulkan SDK installer..."
+
+            chmod +x "$INSTALLER"
+
+            # Install core and iOS support components.
             "$INSTALLER" \
               --root "$SDK_INSTALL" \
               --accept-licenses \
               --default-answer \
               --confirm-command \
-              install
-
-            hdiutil detach /Volumes/VulkanSDK
-
-            rm -f "$CM_BUILD_DIR/vulkan.dmg"
+              install \
+              com.lunarg.vulkan.core \
+              com.lunarg.vulkan.ios \
+              copy_only=1
 
           fi
 
-          test -f "$SDK_CHECK"
+          echo "Verifying Vulkan SDK..."
 
-          echo "Vulkan SDK installation verified."
+          if [ ! -f "$SDK_CHECK" ]; then
+            echo "ERROR: MoltenVK iOS ARM64 library missing."
+
+            find "$SDK_INSTALL" \
+              -iname '*moltenvk*' \
+              -print
+
+            exit 1
+          fi
+
+          echo "Vulkan SDK installation successful."
+
+          echo "VULKAN_SDK=$VULKAN_SDK"
+
+          ls -lh "$SDK_CHECK"
+
+          rm -rf "$SDK_TEMP"
+          rm -f "$SDK_ARCHIVE"
+
 
       # --------------------------------------------------
       # 6. FETCH MOLTENVK AND FONTS
