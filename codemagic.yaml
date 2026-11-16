@@ -1,16 +1,23 @@
+
 workflows:
-  ios-generals-zh-no-steam:
-    name: Build Generals Zero Hour iOS (No Steam / Files Enabled)
-    max_build_duration: 90
+  ios-generals-zh-unsigned:
+    name: Generals Zero Hour - iOS Unsigned IPA
+    max_build_duration: 120
     instance_type: mac_mini_m2
 
     environment:
+      xcode: latest
+
       vars:
         VCPKG_ROOT: "$HOME/vcpkg"
+
         VULKAN_VERSION: "1.3.296.0"
         VULKAN_SDK: "$HOME/VulkanSDK/1.3.296.0/macOS"
+
+        GX_MOLTENVK_ROOT: "$HOME/GeneralsX/MoltenVK"
+        GX_FONTS: "$HOME/GeneralsX/ios-staging/fonts"
+
         GX_BUNDLE_ID: "com.custom.generalszh"
-      xcode: latest
 
     cache:
       cache_paths:
@@ -18,71 +25,463 @@ workflows:
         - $HOME/VulkanSDK
 
     scripts:
+
+      # --------------------------------------------------
+      # 1. CHECK BUILD ENVIRONMENT
+      # --------------------------------------------------
+
+      - name: Check Xcode and macOS
+        script: |
+          set -euo pipefail
+
+          echo "Checking macOS..."
+          sw_vers
+
+          echo "Checking Xcode..."
+          xcodebuild -version
+
+          echo "Checking architecture..."
+          uname -m
+
+          echo "Checking available disk space..."
+          df -h /
+
+      # --------------------------------------------------
+      # 2. INITIALIZE SUBMODULES
+      # --------------------------------------------------
+
       - name: Initialize Git Submodules
         script: |
+          set -euo pipefail
+
+          git submodule sync --recursive
           git submodule update --init --recursive
 
-      - name: Install Homebrew Build Tools
+          echo "Submodules initialized."
+
+          git submodule status
+
+      # --------------------------------------------------
+      # 3. INSTALL DEPENDENCIES
+      # --------------------------------------------------
+
+      - name: Install Build Dependencies
         script: |
-          brew update
+          set -euo pipefail
+
           brew install cmake ninja meson pkgconf xcodegen
+
+          cmake --version
+          ninja --version
+          meson --version
+          xcodegen --version
+
+      # --------------------------------------------------
+      # 4. SETUP VCPKG
+      # --------------------------------------------------
 
       - name: Setup vcpkg
         script: |
-          if [ ! -d "$VCPKG_ROOT" ]; then
-            git clone https://github.com "$VCPKG_ROOT"
-            "$VCPKG_ROOT/bootstrap-vcpkg.sh"
+          set -euo pipefail
+
+          export VCPKG_DISABLE_METRICS=1
+
+          echo "Preparing vcpkg..."
+
+          if [ ! -f "$VCPKG_ROOT/bootstrap-vcpkg.sh" ]; then
+
+            echo "vcpkg repository missing. Cloning..."
+
+            rm -rf "$VCPKG_ROOT"
+
+            git clone \
+              https://github.com/microsoft/vcpkg.git \
+              "$VCPKG_ROOT"
+
           fi
+
+          cd "$VCPKG_ROOT"
+
+          # Manifest baselines require full Git history.
+          if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
+            git fetch --unshallow
+          fi
+
+          echo "Bootstrapping vcpkg..."
+
+          ./bootstrap-vcpkg.sh -disableMetrics
+
+          export PATH="$VCPKG_ROOT:$PATH"
+
+          vcpkg version
+
+          echo "vcpkg ready."
+
+      # --------------------------------------------------
+      # 5. INSTALL VULKAN SDK
+      # --------------------------------------------------
 
       - name: Install LunarG Vulkan SDK
         script: |
-          if [ ! -d "$VULKAN_SDK" ]; then
-            curl -L "https://lunarg.com{VULKAN_VERSION}/mac/vulkansdk-macos-${VULKAN_VERSION}.dmg" -o vulkan.dmg
-            hdiutil attach vulkan.dmg -mountpoint /Volumes/VulkanSDK
-            /Volumes/VulkanSDK/InstallVulkan.app/Contents/MacOS/InstallVulkan \
-              --root "$HOME/VulkanSDK/${VULKAN_VERSION}" \
-              --accept-licenses --default-answer --confirm-command install
+          set -euo pipefail
+
+          SDK_INSTALL="$HOME/VulkanSDK/${VULKAN_VERSION}"
+          SDK_CHECK="$VULKAN_SDK/lib/MoltenVK.xcframework/ios-arm64/libMoltenVK.a"
+
+          if [ -f "$SDK_CHECK" ]; then
+            echo "Vulkan SDK already installed."
+          else
+
+            echo "Downloading Vulkan SDK ${VULKAN_VERSION}..."
+
+            mkdir -p "$HOME/VulkanSDK"
+
+            curl -fL --retry 3 \
+              "https://sdk.lunarg.com/sdk/download/${VULKAN_VERSION}/mac/vulkansdk-macos-${VULKAN_VERSION}.dmg" \
+              -o "$CM_BUILD_DIR/vulkan.dmg"
+
+            hdiutil attach "$CM_BUILD_DIR/vulkan.dmg" \
+              -mountpoint /Volumes/VulkanSDK \
+              -nobrowse
+
+            INSTALLER="/Volumes/VulkanSDK/InstallVulkan.app/Contents/MacOS/InstallVulkan"
+
+            if [ ! -x "$INSTALLER" ]; then
+              echo "Vulkan installer not found."
+              ls -la /Volumes/VulkanSDK
+              exit 1
+            fi
+
+            "$INSTALLER" \
+              --root "$SDK_INSTALL" \
+              --accept-licenses \
+              --default-answer \
+              --confirm-command \
+              install
+
             hdiutil detach /Volumes/VulkanSDK
-            rm vulkan.dmg
+
+            rm -f "$CM_BUILD_DIR/vulkan.dmg"
+
           fi
 
-      - name: Fetch MoltenVK & Stage Fonts
+          test -f "$SDK_CHECK"
+
+          echo "Vulkan SDK installation verified."
+
+      # --------------------------------------------------
+      # 6. FETCH MOLTENVK AND FONTS
+      # --------------------------------------------------
+
+      - name: Fetch MoltenVK and Stage Fonts
         script: |
+          set -euo pipefail
+
           chmod +x ./scripts/build/ios/*.sh
+
+          echo "Fetching MoltenVK..."
+
           ./scripts/build/ios/fetch-moltenvk.sh
+
+          echo "Staging fonts..."
+
           ./scripts/build/ios/stage-fonts.sh
 
-      - name: Create Dummy Asset Folder for Build Validation
-        script: |
-          mkdir -p "$HOME/GeneralsX/GeneralsZH/Data"
-          mkdir -p "$HOME/GeneralsX/GeneralsZH/Maps"
+          MVK_FRAMEWORK="$GX_MOLTENVK_ROOT/MoltenVK/MoltenVK/dynamic/MoltenVK.xcframework/ios-arm64/MoltenVK.framework"
 
-      - name: Configure and Compile iOS Engine
+          test -d "$MVK_FRAMEWORK"
+
+          test -f "$GX_FONTS/arial.ttf"
+          test -f "$GX_FONTS/arialbold.ttf"
+          test -f "$GX_FONTS/couriernew.ttf"
+          test -f "$GX_FONTS/timesnewroman.ttf"
+
+          echo "MoltenVK and fonts are ready."
+
+      # --------------------------------------------------
+      # 7. CONFIGURE IOS ARM64
+      # --------------------------------------------------
+
+      - name: Configure iOS ARM64
         script: |
-          export PATH="$VULKAN_SDK/bin:$PATH"
+          set -euo pipefail
+
+          export VCPKG_ROOT
+          export VCPKG_DISABLE_METRICS=1
+          export PATH="$VULKAN_SDK/bin:$VCPKG_ROOT:$PATH"
+
+          echo "Configuring iOS Vulkan build..."
+
           cmake --preset ios-vulkan
-          cmake --build build/ios-vulkan --target z_generals -j$(sysctl -n hw.ncpu)
 
-      - name: Package Unsigned IPA with Files App Access
+          echo "CMake configuration complete."
+
+      # --------------------------------------------------
+      # 8. COMPILE GENERALS ENGINE
+      # --------------------------------------------------
+
+      - name: Build Generals Engine
         script: |
-          ./scripts/build/ios/package-ios-zh.sh || true
-          
-          APP_PATH=$(find build -name "*.app" -type d | head -n 1)
-          if [ -z "$APP_PATH" ]; then
-            echo "Error: Compiled .app bundle not found!"
+          set -euo pipefail
+
+          export VCPKG_ROOT
+          export VCPKG_DISABLE_METRICS=1
+          export PATH="$VULKAN_SDK/bin:$VCPKG_ROOT:$PATH"
+
+          echo "Building Generals Zero Hour..."
+
+          cmake --build build/ios-vulkan \
+            --target z_generals \
+            --parallel "$(sysctl -n hw.ncpu)"
+
+          GAME_BIN="build/ios-vulkan/GeneralsMD/GeneralsXZH.app/GeneralsXZH"
+
+          if [ ! -f "$GAME_BIN" ]; then
+            echo "ERROR: Generals engine executable missing."
+
+            find build/ios-vulkan \
+              -name "GeneralsXZH" -type f
+
             exit 1
           fi
 
-          # Enable iOS Files app access so you can copy game files via USB/Finder/Files
-          /usr/libexec/PlistBuddy -c "Add :UIFileSharingEnabled bool true" "$APP_PATH/Info.plist" || \
-          /usr/libexec/PlistBuddy -c "Set :UIFileSharingEnabled true" "$APP_PATH/Info.plist"
-          /usr/libexec/PlistBuddy -c "Add :LSSupportsOpeningDocumentsInPlace bool true" "$APP_PATH/Info.plist" || \
-          /usr/libexec/PlistBuddy -c "Set :LSSupportsOpeningDocumentsInPlace true" "$APP_PATH/Info.plist"
+          echo "Engine compilation successful."
 
-          mkdir -p build/ipa/Payload
-          cp -R "$APP_PATH" build/ipa/Payload/
-          cd build/ipa
-          zip -r -y "$CM_BUILD_DIR/GeneralsZH-EngineOnly-Unsigned.ipa" Payload
+          file "$GAME_BIN"
+
+      # --------------------------------------------------
+      # 9. GENERATE UNSIGNED XCODE PROJECT
+      # --------------------------------------------------
+
+      - name: Generate Unsigned iOS Wrapper
+        script: |
+          set -euo pipefail
+
+          cd ios
+
+          xcodegen generate --quiet
+
+          cd ..
+
+          PROJECT="ios/GeneralsXZH.xcodeproj"
+
+          test -d "$PROJECT"
+
+          echo "Building unsigned iOS application..."
+
+          xcodebuild \
+            -project "$PROJECT" \
+            -scheme GeneralsXZH \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$CM_BUILD_DIR/ios-derived" \
+            PRODUCT_BUNDLE_IDENTIFIER="$GX_BUNDLE_ID" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            build
+
+          SHELL_APP="$CM_BUILD_DIR/ios-derived/Build/Products/Release-iphoneos/GeneralsXZH.app"
+
+          if [ ! -d "$SHELL_APP" ]; then
+            echo "ERROR: Unsigned iOS wrapper was not generated."
+            exit 1
+          fi
+
+          echo "Unsigned wrapper created."
+
+      # --------------------------------------------------
+      # 10. PACKAGE ENGINE AND FRAMEWORKS
+      # --------------------------------------------------
+
+      - name: Assemble Unsigned Generals App
+        script: |
+          set -euo pipefail
+
+          APP_NAME="GeneralsXZH"
+
+          BUILD_DIR="$CM_BUILD_DIR/ios-derived/Build/Products/Release-iphoneos"
+          APP="$CM_BUILD_DIR/unsigned-package/${APP_NAME}.app"
+
+          GAME_BIN="$CM_BUILD_DIR/build/ios-vulkan/GeneralsMD/GeneralsXZH.app/GeneralsXZH"
+
+          # The CMake build is located in the repository workspace.
+          GAME_BIN="build/ios-vulkan/GeneralsMD/GeneralsXZH.app/GeneralsXZH"
+
+          DXVK_BUILD="build/ios-vulkan/_deps/dxvk-build-macos"
+
+          MVK_FRAMEWORK="$GX_MOLTENVK_ROOT/MoltenVK/MoltenVK/dynamic/MoltenVK.xcframework/ios-arm64/MoltenVK.framework"
+
+          mkdir -p "$CM_BUILD_DIR/unsigned-package"
+
+          rm -rf "$APP"
+
+          cp -R "$BUILD_DIR/${APP_NAME}.app" "$APP"
+
+          # Replace the Xcode stub with the actual game engine.
+          test -f "$GAME_BIN"
+
+          cp "$GAME_BIN" "$APP/${APP_NAME}"
+
+          # Embed required iOS runtime libraries.
+          mkdir -p "$APP/Frameworks"
+
+          for LIB in \
+            "$DXVK_BUILD/src/d3d8/libdxvk_d3d8.0.dylib" \
+            "$DXVK_BUILD/src/d3d9/libdxvk_d3d9.0.dylib" \
+            "build/ios-vulkan/_deps/sdl3-build/libSDL3.0.dylib" \
+            "build/ios-vulkan/_deps/sdl3_image-build/libSDL3_image.0.dylib" \
+            "build/ios-vulkan/_deps/openal_soft-build/libopenal.1.24.2.dylib" \
+            "build/ios-vulkan/libgamespy.dylib"
+          do
+
+            if [ -f "$LIB" ]; then
+
+              cp "$LIB" "$APP/Frameworks/"
+
+              echo "Embedded: $(basename "$LIB")"
+
+            else
+
+              case "$(basename "$LIB")" in
+                libgamespy.dylib)
+                  echo "Optional GameSpy library not present."
+                  ;;
+                *)
+                  echo "ERROR: Required library missing: $LIB"
+                  exit 1
+                  ;;
+              esac
+
+            fi
+
+          done
+
+          # Match the expected OpenAL install name.
+          if [ -f "$APP/Frameworks/libopenal.1.24.2.dylib" ]; then
+            mv \
+              "$APP/Frameworks/libopenal.1.24.2.dylib" \
+              "$APP/Frameworks/libopenal.1.dylib"
+          fi
+
+          # Embed MoltenVK dynamic framework.
+          test -d "$MVK_FRAMEWORK"
+
+          cp -R "$MVK_FRAMEWORK" "$APP/Frameworks/"
+
+          # Include fonts and default configuration.
+          mkdir -p "$APP/GameData/fonts"
+
+          cp "$GX_FONTS"/*.ttf "$APP/GameData/fonts/"
+
+          cp ios/config/dxvk.conf "$APP/GameData/dxvk.conf"
+
+          cp ios/config/Options.ini "$APP/GameData/DefaultOptions.ini"
+
+          # Add framework runtime search path.
+          if ! otool -l "$APP/$APP_NAME" | grep -q '@executable_path/Frameworks'; then
+            install_name_tool \
+              -add_rpath "@executable_path/Frameworks" \
+              "$APP/$APP_NAME"
+          fi
+
+          # Ensure Files app support.
+          /usr/libexec/PlistBuddy \
+            -c "Set :UIFileSharingEnabled true" \
+            "$APP/Info.plist" 2>/dev/null || \
+          /usr/libexec/PlistBuddy \
+            -c "Add :UIFileSharingEnabled bool true" \
+            "$APP/Info.plist"
+
+          /usr/libexec/PlistBuddy \
+            -c "Set :LSSupportsOpeningDocumentsInPlace true" \
+            "$APP/Info.plist" 2>/dev/null || \
+          /usr/libexec/PlistBuddy \
+            -c "Add :LSSupportsOpeningDocumentsInPlace bool true" \
+            "$APP/Info.plist"
+
+          # Remove any signing remnants.
+          rm -rf "$APP/_CodeSignature"
+
+          rm -f "$APP/embedded.mobileprovision"
+
+          rm -rf "$APP/Frameworks/"*.dylib/_CodeSignature
+
+          rm -rf "$APP/Frameworks/MoltenVK.framework/_CodeSignature"
+
+          echo "Unsigned app assembled."
+
+      # --------------------------------------------------
+      # 11. VERIFY UNSIGNED APP
+      # --------------------------------------------------
+
+      - name: Verify Unsigned Application
+        script: |
+          set -euo pipefail
+
+          APP="$CM_BUILD_DIR/unsigned-package/GeneralsXZH.app"
+
+          test -d "$APP"
+          test -f "$APP/GeneralsXZH"
+          test -d "$APP/Frameworks/MoltenVK.framework"
+          test -d "$APP/GameData/fonts"
+
+          echo "Checking bundle information..."
+
+          /usr/libexec/PlistBuddy \
+            -c "Print :CFBundleIdentifier" \
+            "$APP/Info.plist"
+
+          echo "Checking embedded frameworks..."
+
+          ls -lah "$APP/Frameworks"
+
+          echo "Checking executable architecture..."
+
+          file "$APP/GeneralsXZH"
+
+          echo "Checking that no provisioning profile exists..."
+
+          if [ -f "$APP/embedded.mobileprovision" ]; then
+            echo "ERROR: Unexpected provisioning profile."
+            exit 1
+          fi
+
+          echo "Unsigned app verification complete."
+
+      # --------------------------------------------------
+      # 12. CREATE UNSIGNED IPA
+      # --------------------------------------------------
+
+      - name: Export Unsigned IPA
+        script: |
+          set -euo pipefail
+
+          APP="$CM_BUILD_DIR/unsigned-package/GeneralsXZH.app"
+
+          IPA_DIR="$CM_BUILD_DIR/ipa"
+
+          mkdir -p "$IPA_DIR/Payload"
+
+          cp -R "$APP" "$IPA_DIR/Payload/"
+
+          cd "$IPA_DIR"
+
+          echo "Creating unsigned IPA..."
+
+          /usr/bin/zip -qry -y \
+            "$CM_BUILD_DIR/GeneralsZH-EngineOnly-Unsigned.ipa" \
+            Payload
+
+          test -s "$CM_BUILD_DIR/GeneralsZH-EngineOnly-Unsigned.ipa"
+
+          echo "IPA successfully created."
+
+          ls -lh "$CM_BUILD_DIR/GeneralsZH-EngineOnly-Unsigned.ipa"
 
     artifacts:
       - GeneralsZH-EngineOnly-Unsigned.ipa
+      - build/ios-vulkan/**/*.log
+      - ios/build/Logs/**/*.log
+      - /tmp/xcodebuild_logs/*.log
