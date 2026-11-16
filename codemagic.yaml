@@ -1,0 +1,88 @@
+workflows:
+  ios-generals-zh-no-steam:
+    name: Build Generals Zero Hour iOS (No Steam / Files Enabled)
+    max_build_duration: 90
+    instance_type: mac_mini_m2
+
+    environment:
+      vars:
+        VCPKG_ROOT: "$HOME/vcpkg"
+        VULKAN_VERSION: "1.3.296.0"
+        VULKAN_SDK: "$HOME/VulkanSDK/1.3.296.0/macOS"
+        GX_BUNDLE_ID: "com.custom.generalszh"
+      xcode: latest
+
+    cache:
+      cache_paths:
+        - $HOME/vcpkg
+        - $HOME/VulkanSDK
+
+    scripts:
+      - name: Initialize Git Submodules
+        script: |
+          git submodule update --init --recursive
+
+      - name: Install Homebrew Build Tools
+        script: |
+          brew update
+          brew install cmake ninja meson pkgconf xcodegen
+
+      - name: Setup vcpkg
+        script: |
+          if [ ! -d "$VCPKG_ROOT" ]; then
+            git clone https://github.com "$VCPKG_ROOT"
+            "$VCPKG_ROOT/bootstrap-vcpkg.sh"
+          fi
+
+      - name: Install LunarG Vulkan SDK
+        script: |
+          if [ ! -d "$VULKAN_SDK" ]; then
+            curl -L "https://lunarg.com{VULKAN_VERSION}/mac/vulkansdk-macos-${VULKAN_VERSION}.dmg" -o vulkan.dmg
+            hdiutil attach vulkan.dmg -mountpoint /Volumes/VulkanSDK
+            /Volumes/VulkanSDK/InstallVulkan.app/Contents/MacOS/InstallVulkan \
+              --root "$HOME/VulkanSDK/${VULKAN_VERSION}" \
+              --accept-licenses --default-answer --confirm-command install
+            hdiutil detach /Volumes/VulkanSDK
+            rm vulkan.dmg
+          fi
+
+      - name: Fetch MoltenVK & Stage Fonts
+        script: |
+          chmod +x ./scripts/build/ios/*.sh
+          ./scripts/build/ios/fetch-moltenvk.sh
+          ./scripts/build/ios/stage-fonts.sh
+
+      - name: Create Dummy Asset Folder for Build Validation
+        script: |
+          mkdir -p "$HOME/GeneralsX/GeneralsZH/Data"
+          mkdir -p "$HOME/GeneralsX/GeneralsZH/Maps"
+
+      - name: Configure and Compile iOS Engine
+        script: |
+          export PATH="$VULKAN_SDK/bin:$PATH"
+          cmake --preset ios-vulkan
+          cmake --build build/ios-vulkan --target z_generals -j$(sysctl -n hw.ncpu)
+
+      - name: Package Unsigned IPA with Files App Access
+        script: |
+          ./scripts/build/ios/package-ios-zh.sh || true
+          
+          APP_PATH=$(find build -name "*.app" -type d | head -n 1)
+          if [ -z "$APP_PATH" ]; then
+            echo "Error: Compiled .app bundle not found!"
+            exit 1
+          fi
+
+          # Enable iOS Files app access so you can copy game files via USB/Finder/Files
+          /usr/libexec/PlistBuddy -c "Add :UIFileSharingEnabled bool true" "$APP_PATH/Info.plist" || \
+          /usr/libexec/PlistBuddy -c "Set :UIFileSharingEnabled true" "$APP_PATH/Info.plist"
+          /usr/libexec/PlistBuddy -c "Add :LSSupportsOpeningDocumentsInPlace bool true" "$APP_PATH/Info.plist" || \
+          /usr/libexec/PlistBuddy -c "Set :LSSupportsOpeningDocumentsInPlace true" "$APP_PATH/Info.plist"
+
+          mkdir -p build/ipa/Payload
+          cp -R "$APP_PATH" build/ipa/Payload/
+          cd build/ipa
+          zip -r -y "$CM_BUILD_DIR/GeneralsZH-EngineOnly-Unsigned.ipa" Payload
+
+    artifacts:
+      - GeneralsZH-EngineOnly-Unsigned.ipa
