@@ -133,6 +133,8 @@ workflows:
           export PATH="$(brew --prefix)/bin:$(brew --prefix)/sbin:$PATH"
           command -v glslangValidator
           glslangValidator --version
+          rm -rf build/ios-vulkan
+          rm -rf vcpkg_installed/arm64-ios
           cmake --preset ios-vulkan
 
       - name: Compile Generals Zero Hour engine for iPhone
